@@ -1,0 +1,79 @@
+# Pre-commit hooks configuration
+# 在 git commit 前自动运行代码质量检查
+# 安装: pip install pre-commit && pre-commit install
+
+repos:
+  # Black - 代码格式化
+  - repo: https://github.com/psf/black
+    rev: 23.3.0
+    hooks:
+      - id: black
+        language_version: python3.9
+        args: [--line-length=120]
+
+  # Isort - 导入排序
+  - repo: https://github.com/PyCQA/isort
+    rev: 5.12.0
+    hooks:
+      - id: isort
+        args: [--profile=black, --line-length=120]
+
+  # Flake8 - 代码风格检查（轻量级，比 Pylint 快）
+  - repo: https://github.com/PyCQA/flake8
+    rev: 6.0.0
+    hooks:
+      - id: flake8
+        args: [--max-line-length=120, --extend-ignore=E203,W503]
+
+  # MyPy - 类型检查
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.3.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [types-all]
+        args: [--ignore-missing-imports, --no-strict-optional]
+
+  # Bandit - 安全检查
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.5
+    hooks:
+      - id: bandit
+        args: [-ll, -r, src/]
+        files: ^src/
+
+  # 通用检查
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      # 检查文件大小
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+      # 检查 YAML 语法
+      - id: check-yaml
+      # 检查 JSON 语法
+      - id: check-json
+      # 检查合并冲突标记
+      - id: check-merge-conflict
+      # 检查文件末尾换行
+      - id: end-of-file-fixer
+      # 移除行尾空格
+      - id: trailing-whitespace
+      # 检查私钥
+      - id: detect-private-key
+      # 检查 Python 调试语句
+      - id: debug-statements
+
+  # 检查敏感信息（防止提交 API Key 等）
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: package.lock.json
+
+# 配置说明：
+# 1. 安装 pre-commit: pip install pre-commit
+# 2. 安装 hooks: pre-commit install
+# 3. 手动运行所有 hooks: pre-commit run --all-files
+# 4. 跳过 hooks（紧急情况）: git commit --no-verify
+# 5. 更新 hooks: pre-commit autoupdate

@@ -1,0 +1,114 @@
+[MASTER]
+# Python 版本
+py-version=3.8
+
+# 并行检查
+jobs=4
+
+# 忽略的文件或目录
+ignore=CVS,.git,__pycache__,.venv,venv
+
+[MESSAGES CONTROL]
+# 禁用的检查
+disable=
+    C0111,  # missing-docstring (我们会在审查时手动检查)
+    R0903,  # too-few-public-methods
+    W0212,  # protected-access
+    C0103,  # invalid-name (某些情况下需要单字母变量)
+    R0913,  # too-many-arguments (某些函数确实需要多参数)
+    R0914,  # too-many-locals
+    C0301,  # line-too-long (由 black 处理)
+
+# 启用的检查
+enable=
+    useless-suppression,
+    deprecated-pragma,
+    use-symbolic-message-instead
+
+[REPORTS]
+# 输出格式
+output-format=colorized
+
+# 报告
+reports=yes
+
+# 评分
+score=yes
+
+[BASIC]
+# 命名规范
+argument-naming-style=snake_case
+attr-naming-style=snake_case
+class-attribute-naming-style=any
+class-naming-style=PascalCase
+const-naming-style=UPPER_CASE
+function-naming-style=snake_case
+method-naming-style=snake_case
+module-naming-style=snake_case
+variable-naming-style=snake_case
+
+# 好的变量名
+good-names=i,j,k,x,y,z,id,_,df,lr,fc
+
+# 坏的变量名
+bad-names=foo,bar,baz,toto,tutu,tata
+
+[FORMAT]
+# 最大行长度
+max-line-length=120
+
+# 缩进
+indent-string='    '
+
+# 每个缩进级别的空格数
+indent-after-paren=4
+
+[DESIGN]
+# 最大参数数量
+max-args=7
+
+# 最大属性数量
+max-attributes=10
+
+# 最大分支数量
+max-branches=15
+
+# 最大局部变量数量
+max-locals=20
+
+# 最大返回语句数量
+max-returns=6
+
+# 最大语句数量
+max-statements=60
+
+# 最小公共方法数量
+min-public-methods=1
+
+[SIMILARITIES]
+# 最小相似行数
+min-similarity-lines=4
+
+# 忽略注释
+ignore-comments=yes
+
+# 忽略文档字符串
+ignore-docstrings=yes
+
+# 忽略导入
+ignore-imports=yes
+
+[TYPECHECK]
+# 忽略的类
+ignored-classes=optparse.Values,thread._local,_thread._local
+
+# 忽略的模块
+ignored-modules=numpy,torch,pandas
+
+[IMPORTS]
+# 允许通配符导入
+allow-wildcard-with-all=no
+
+[EXCEPTIONS]
+# 覆盖的异常
+overgeneral-exceptions=builtins.Exception

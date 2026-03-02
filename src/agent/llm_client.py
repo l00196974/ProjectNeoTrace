@@ -193,17 +193,17 @@ class MockLLMClient(LLMClient):
 
     def call(self, prompt: str, **kwargs) -> str:
         """返回模拟响应"""
-        # 模拟 LLM 响应
+        # 模拟 LLM 响应（使用新的置信度格式）
         mock_response = {
             "intents": [
                 {
                     "name": "automotive_purchase",
-                    "confidence": 0.75,
+                    "confidence": "medium",
                     "reasoning": "用户浏览了多款车型配置页",
                 },
                 {
                     "name": "automotive_comparison",
-                    "confidence": 0.85,
+                    "confidence": "high",
                     "reasoning": "用户对比了不同车型",
                 },
             ],

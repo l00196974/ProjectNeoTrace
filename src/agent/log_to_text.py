@@ -4,8 +4,37 @@
 """
 
 from typing import Dict, List
-from src.ingestion.state_machine import APP_CATEGORY_MAP
 
+
+# 应用类目映射
+APP_CATEGORY_MAP = {
+    # 汽车类
+    "com.autohome": "automotive",
+    "com.yiche": "automotive",
+    "com.bitauto": "automotive",
+    "com.xcar": "automotive",
+    "com.pcauto": "automotive",
+    # 社交类
+    "com.tencent.mm": "social",
+    "com.tencent.mobileqq": "social",
+    "com.sina.weibo": "social",
+    "com.tencent.wework": "social",
+    # 外卖类
+    "com.sankuai.meituan": "food_delivery",
+    "me.ele": "food_delivery",
+    # 电商类
+    "com.taobao.taobao": "shopping",
+    "com.jingdong.app.mall": "shopping",
+    "com.xunmeng.pinduoduo": "shopping",
+    # 娱乐类
+    "com.ss.android.ugc.aweme": "entertainment",
+    "com.tencent.qqlive": "entertainment",
+    "com.youku.phone": "entertainment",
+    # 金融类
+    "com.tencent.wemoney.app": "finance",
+    "com.eg.android.AlipayGphone": "finance",
+    "com.chinamworld.main": "finance",
+}
 
 # 应用包名到中文名称的映射
 APP_NAME_MAP = {

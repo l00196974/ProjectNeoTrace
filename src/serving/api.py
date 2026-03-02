@@ -58,7 +58,7 @@ def health():
 @app.route("/predict", methods=["POST"])
 def predict():
     """
-    预测接口
+    预测接口（v2 - 返回意图特征）
 
     请求格式：
     {
@@ -75,12 +75,18 @@ def predict():
         }
     }
 
-    响应格式：
+    响应格式（v2）：
     {
         "device_id": "device_000001",
+        "intent_features": {
+            "intent_probs": [0.1, 0.2, ...],  # 11-dim 概率向量
+            "intent_embedding": [...],  # 128-dim 向量
+            "primary_intent": "automotive_purchase",
+            "urgency_level": "high"
+        },
         "lead_score": 0.75,
-        "intent_probs": [0.1, 0.2, ...],
-        "timestamp": 1234567890
+        "timestamp": 1234567890,
+        "api_version": "v2"
     }
     """
     try:
@@ -114,12 +120,13 @@ def predict():
         # 3. 预测
         result = engine.predict_lead_score(session_text, session_features)
 
-        # 4. 构建响应
+        # 4. 构建响应（v2 格式）
         response = {
             "device_id": session.get("device_id", "unknown"),
+            "intent_features": result["intent_features"],
             "lead_score": result["lead_score"],
-            "intent_probs": result["intent_probs"],
             "timestamp": int(time.time()),
+            "api_version": "v2",
         }
 
         return jsonify(response)
@@ -131,7 +138,7 @@ def predict():
 @app.route("/batch_predict", methods=["POST"])
 def batch_predict():
     """
-    批量预测接口
+    批量预测接口（v2 - 返回意图特征）
 
     请求格式：
     {
@@ -141,13 +148,23 @@ def batch_predict():
         ]
     }
 
-    响应格式：
+    响应格式（v2）：
     {
         "results": [
-            {"device_id": "...", "lead_score": 0.75, ...},
-            {"device_id": "...", "lead_score": 0.82, ...}
+            {
+                "device_id": "...",
+                "intent_features": {
+                    "intent_probs": [...],
+                    "intent_embedding": [...],
+                    "primary_intent": "automotive_purchase",
+                    "urgency_level": "high"
+                },
+                "lead_score": 0.75
+            },
+            ...
         ],
-        "timestamp": 1234567890
+        "timestamp": 1234567890,
+        "api_version": "v2"
     }
     """
     try:
@@ -187,12 +204,16 @@ def batch_predict():
             results.append(
                 {
                     "device_id": session.get("device_id", "unknown"),
+                    "intent_features": result["intent_features"],
                     "lead_score": result["lead_score"],
-                    "intent_probs": result["intent_probs"],
                 }
             )
 
-        response = {"results": results, "timestamp": int(time.time())}
+        response = {
+            "results": results,
+            "timestamp": int(time.time()),
+            "api_version": "v2",
+        }
 
         return jsonify(response)
 

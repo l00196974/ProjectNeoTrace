@@ -1,6 +1,7 @@
 """状态机实现 - 识别 Session 边界
 
 状态机用于识别用户行为序列中的 Session 边界。
+使用规则引擎实现可扩展的切片规则管理。
 
 切片规则（按优先级）：
 1. 息屏 > 10min → 新 Session
@@ -8,8 +9,20 @@
 3. 应用类目跳变 → 新 Session
 """
 
+import logging
 from typing import Dict, Optional
 from enum import Enum
+
+from .rule_engine import RuleEngine, RuleRegistry, RuleContext
+from .rule_engine.config import RuleConfig
+from .rule_engine.rules import ScreenOffRule, LBSCrossingRule, AppCategoryRule
+
+# 确保规则已注册
+RuleRegistry.register("screen_off", ScreenOffRule)
+RuleRegistry.register("lbs_crossing", LBSCrossingRule)
+RuleRegistry.register("app_category_change", AppCategoryRule)
+
+logger = logging.getLogger(__name__)
 
 
 class SessionState(Enum):
@@ -20,63 +33,45 @@ class SessionState(Enum):
     ENDED = "ended"  # Session 结束
 
 
-# 应用类目映射
-APP_CATEGORY_MAP = {
-    # 汽车类
-    "com.autohome": "automotive",
-    "com.yiche": "automotive",
-    "com.bitauto": "automotive",
-    "com.xcar": "automotive",
-    "com.pcauto": "automotive",
-    # 社交类
-    "com.tencent.mm": "social",
-    "com.tencent.mobileqq": "social",
-    "com.sina.weibo": "social",
-    "com.tencent.wework": "social",
-    # 外卖类
-    "com.sankuai.meituan": "food_delivery",
-    "me.ele": "food_delivery",
-    # 电商类
-    "com.taobao.taobao": "shopping",
-    "com.jingdong.app.mall": "shopping",
-    "com.xunmeng.pinduoduo": "shopping",
-    # 娱乐类
-    "com.ss.android.ugc.aweme": "entertainment",
-    "com.tencent.qqlive": "entertainment",
-    "com.youku.phone": "entertainment",
-    # 金融类
-    "com.tencent.wemoney.app": "finance",
-    "com.eg.android.AlipayGphone": "finance",
-    "com.chinamworld.main": "finance",
-}
-
-# POI 类型层级（用于判断地标跨越）
-POI_HIERARCHY = {
-    "home": 1,
-    "office": 1,
-    "auto_market": 2,
-    "4s_store": 2,
-    "shopping_mall": 1,
-    "restaurant": 1,
-    "gas_station": 1,
-}
-
-
 class SessionStateMachine:
-    """Session 状态机"""
+    """Session 状态机 - 使用规则引擎"""
 
     def __init__(
         self,
-        screen_off_threshold: int = 600,  # 息屏阈值（秒），默认 10 分钟
+        config_path: Optional[str] = None,
+        screen_off_threshold: Optional[int] = None,  # 向后兼容参数
     ):
         """
         初始化状态机
 
         Args:
-            screen_off_threshold: 息屏阈值（秒）
+            config_path: 规则配置文件路径（可选）
+            screen_off_threshold: 息屏阈值（秒），用于向后兼容
         """
-        self.screen_off_threshold = screen_off_threshold
+        # 加载配置
+        if config_path:
+            config = RuleConfig.load_from_yaml(config_path)
+        else:
+            config = RuleConfig.get_default_config()
+
+            # 向后兼容：如果提供了 screen_off_threshold，覆盖默认配置
+            if screen_off_threshold is not None:
+                for rule in config["rules"]:
+                    if rule["type"] == "screen_off":
+                        rule["params"]["threshold_seconds"] = screen_off_threshold
+
+        # 构建规则引擎
+        rules = [
+            RuleRegistry.create_rule(r["id"], r)
+            for r in config["rules"]
+        ]
+        execution_mode = config.get("execution", {}).get("mode", "chain")
+        self.engine = RuleEngine(rules, execution_mode)
+
+        # 初始化状态
         self.reset()
+
+        logger.info(f"状态机初始化完成，加载 {len(rules)} 个规则")
 
     def reset(self):
         """重置状态机"""
@@ -101,38 +96,34 @@ class SessionStateMachine:
             self._update_state(event)
             return False
 
-        timestamp = event["timestamp"]
-        action = event["action"]
-        payload = event.get("payload", {})
-        app_pkg = event.get("app_pkg", "")
+        # 构建规则上下文
+        context = RuleContext(
+            event=event,
+            state=self._get_state_dict()
+        )
 
-        # 规则 1：息屏 > 10min → 新 Session
-        if self.screen_off_time is not None:
-            idle_duration = timestamp - self.screen_off_time
-            if idle_duration > self.screen_off_threshold:
-                self.reset()
-                self._update_state(event)
-                return True
+        # 使用规则引擎评估
+        triggered, reason, new_state = self.engine.evaluate(context)
 
-        # 规则 2：LBS 地标跨越 → 新 Session
-        current_poi = payload.get("lbs_poi")
-        if current_poi and self.last_poi:
-            if self._is_poi_crossing(self.last_poi, current_poi):
-                self.reset()
-                self._update_state(event)
-                return True
-
-        # 规则 3：应用类目跳变 → 新 Session
-        current_category = self._get_app_category(app_pkg)
-        if current_category and self.last_category:
-            if current_category != self.last_category:
-                self.reset()
-                self._update_state(event)
-                return True
+        if triggered:
+            logger.info(f"触发 Session 切割: {reason}")
+            self.reset()
+            self._update_state(event)
+            return True
 
         # 更新状态
         self._update_state(event)
         return False
+
+    def _get_state_dict(self) -> Dict:
+        """获取状态字典"""
+        return {
+            "state": self.state.value,
+            "last_timestamp": self.last_timestamp,
+            "last_poi": self.last_poi,
+            "last_category": self.last_category,
+            "screen_off_time": self.screen_off_time,
+        }
 
     def _update_state(self, event: Dict):
         """更新状态机内部状态"""
@@ -149,9 +140,13 @@ class SessionStateMachine:
             self.last_poi = current_poi
 
         # 更新应用类目
-        current_category = self._get_app_category(app_pkg)
-        if current_category:
-            self.last_category = current_category
+        # 从规则引擎获取类目映射
+        app_category_rule = self.engine.get_rule("app_category_rule")
+        if app_category_rule:
+            category_map = app_category_rule.params.get("category_map", {})
+            current_category = category_map.get(app_pkg)
+            if current_category:
+                self.last_category = current_category
 
         # 更新息屏状态
         if action == "screen_off":
@@ -160,44 +155,3 @@ class SessionStateMachine:
         elif action == "screen_on":
             self.screen_off_time = None
             self.state = SessionState.ACTIVE
-
-    def _is_poi_crossing(self, poi1: str, poi2: str) -> bool:
-        """判断是否为地标跨越。
-
-        地标跨越定义：从一个层级跳到另一个层级
-        例如：home → auto_market（层级 1 → 层级 2）
-
-        Args:
-            poi1: POI 1
-            poi2: POI 2
-
-        Returns:
-            是否为地标跨越
-        """
-        if poi1 == poi2:
-            return False
-
-        # 如果任一 POI 不在字典中，不视为跨越
-        if poi1 not in POI_HIERARCHY or poi2 not in POI_HIERARCHY:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.debug(f"未知 POI: {poi1} 或 {poi2}")
-            return False
-
-        level1 = POI_HIERARCHY[poi1]
-        level2 = POI_HIERARCHY[poi2]
-
-        # 不同层级视为跨越
-        return level1 != level2
-
-    def _get_app_category(self, app_pkg: str) -> Optional[str]:
-        """
-        获取应用类目
-
-        Args:
-            app_pkg: 应用包名
-
-        Returns:
-            应用类目
-        """
-        return APP_CATEGORY_MAP.get(app_pkg)

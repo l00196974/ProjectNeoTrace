@@ -96,7 +96,6 @@ ProjectNeoTrace/
 ├── scripts/                # 脚本工具
 ├── tests/                  # 测试代码
 ├── data/                   # 数据目录
-├── docs/                   # 文档
 └── requirements.txt        # 依赖列表
 ```
 
@@ -213,6 +212,8 @@ docker-compose --profile training up neotrace-training
 - [架构设计](docs/architecture.md)
 - [API 规范](docs/api_spec.md)
 - [部署指南](docs/deployment.md)
+- [模型使用指南](docs/model_usage.md)
+- [验证方法论](docs/validation_methodology.md)
 
 ## 许可证
 

@@ -60,6 +60,17 @@ black --check src/ tests/
 python scripts/generate_mock_data.py
 python scripts/offline_training_pipeline.py
 
+# Log-to-Text conversion (standalone)
+python scripts/convert_sessions_to_text.py \
+  --input data/processed/sessions.csv \
+  --output data/processed/session_texts.csv
+
+# Use custom rule configuration
+python scripts/convert_sessions_to_text.py \
+  --input data/processed/sessions.csv \
+  --output data/processed/session_texts.csv \
+  --config config/log_to_text_rules.yaml
+
 # Start inference API server
 python src/serving/api.py
 
@@ -99,14 +110,23 @@ python -c "from src.pipeline.anomaly_detection import AnomalyDetector; detector 
 
 ## Architecture
 
-### High-Level Structure
+### High-Level Structure (Optimized)
 
-系统采用四阶段流水线架构：
+**优化后的系统采用七阶段流水线架构**：
 
 1. **数据采集与切片**：基于用户全量行为序列进行清洗，完成 session 切片
-2. **语义特征提取**：对各 session 进行 log-to-text 语义化和意图打标，生成向量
-3. **弱监督标签挖掘**：按照车型价格区间分布构建正负样本标签
-4. **对比学习训练**：通过损失函数优化向量，让正样本聚集、负样本分离
+2. **Log-to-Text 转换**：使用规则引擎将 session 转换为文本描述
+3. **Proxy Label 挖掘**：基于业务规则生成 lead/non-lead 二分类标签（全量数据）
+4. **Teacher 标注**：LLM 对 10-20% 子集进行意图标注（分层采样）
+5. **Student 训练**：轻量级模型通过知识蒸馏学习 Teacher 的意图识别能力
+6. **SupCon 训练**：使用二分类 lead/non-lead 标签进行对比学习（全量数据）
+7. **模型推理**：输出意图特征（概率 + 向量）和 lead 评分
+
+**关键优化点**：
+- **成本优化**：Teacher 只标注 15% 子集，降低 85% LLM 成本
+- **架构简化**：Teacher 不再生成向量，只输出意图标签
+- **目标对齐**：SupCon 直接优化 lead/non-lead 分离，而非意图分类
+- **质量保持**：Student 通过知识蒸馏保留 Teacher 的识别能力
 
 **可追溯性保障**：
 - 每个环节都有 trace_id 记录
@@ -114,6 +134,24 @@ python -c "from src.pipeline.anomaly_detection import AnomalyDetector; detector 
 - 记录 session 切片 → 语义化内容、意图标签的映射
 - 记录用户原始行为向量 → 样本标签的映射
 - 支持全链路数据血缘查询
+
+### Architecture Comparison
+
+**优化前**：
+```
+Session Slicing → Log-to-Text → Teacher (全量, 生成向量) → Student → SupCon (意图标签) → 推理
+```
+
+**优化后**：
+```
+Session Slicing → Log-to-Text → Proxy Labels (全量) → Teacher (15% 子集, 只标注) → Student → SupCon (二分类标签, 全量) → 推理
+```
+
+**主要变化**：
+1. Teacher 标注从全量改为 15% 子集（分层采样）
+2. Teacher 输出从 4 个字段简化为 3 个字段（移除 intent_embedding）
+3. SupCon 标签从 11 类意图改为 2 类 lead/non-lead
+4. 推理输出强调意图特征（intent_features），lead_score 为辅助输出
 
 ### Key Components
 
@@ -172,53 +210,105 @@ print(monitor.get_statistics())
 
 **核心文件**：
 
-**Log-to-Text 转换**：
+**Log-to-Text 转换引擎**（基于规则引擎和模板引擎）：
+- `src/features/log_to_text_engine/base.py` - 基础类定义
+- `src/features/log_to_text_engine/registry.py` - 规则注册表
+- `src/features/log_to_text_engine/template_engine.py` - Jinja2 模板引擎
+- `src/features/log_to_text_engine/rules.py` - 具体规则实现
+- `src/features/log_to_text_engine/engine.py` - 执行引擎
+- `src/features/log_to_text_engine/config.py` - 配置管理
+- `src/features/log_to_text_engine/monitor.py` - 监控系统
+- `scripts/convert_sessions_to_text.py` - 独立转换脚本
+
+**传统 Log-to-Text 转换**（保留用于兼容）：
 - `src/features/log_to_text.py` - 主转换逻辑
 - `src/features/log_to_text_quality.py` - 质量指标计算
 - `src/features/log_to_text_ab_test.py` - A/B 测试框架
 - `src/features/log_to_text_feedback.py` - 反馈循环机制
 
-**LLM 集成**：
-- `src/features/llm_client.py` - LLM API 客户端
-- `src/features/teacher_labeling.py` - Teacher 模型标注
-- `src/features/knowledge_enhanced_labeling.py` - 知识增强标注
-- `src/features/prompt_templates.py` - Prompt 模板管理
+**LLM 集成（优化后）**：
+- `src/agent/llm_client.py` - LLM API 客户端
+- `src/agent/teacher_labeling.py` - Teacher 模型标注（简化版）
+- `src/agent/knowledge_enhanced_labeling.py` - 知识增强标注
+- `src/agent/prompt_templates.py` - Prompt 模板管理
 
 **向量生成**：
-- `src/features/embedding.py` - BGE-m3 向量生成
-- `src/features/intent_taxonomy.py` - 意图分类体系
+- `src/agent/embedding.py` - BGE-m3 向量生成（用于 Student 模型）
+- `src/agent/intent_taxonomy.py` - 意图分类体系
 
-**任务**：
-1. **Log-to-Text 转换器**：将 pkg_name 等内部标识通过汽车本体知识库映射到语义表达
-   - 示例：`com.autohome` 长时间使用 → "汽车垂直门户-深度对比"
-2. **LLM 意图打标**：封装调用接口，Prompt 强制输出包含 `urgency_score` 和 `stage` 的结构化 JSON
-3. **双路向量融合**：
-   - 路径 1：原始 Text → BGE-m3 Embedding (V_text)
-   - 路径 2：LLM Intent JSON → Embedding (V_intent)
-   - 操作：Output = Concat(V_text, V_intent)
+**任务（优化后）**：
+1. **Log-to-Text 转换引擎**：基于规则引擎和模板引擎的灵活转换系统
+   - 规则引擎：支持优先级、匹配条件、自定义规则
+   - 模板引擎：Jinja2 语法，支持自定义过滤器和函数
+   - 兜底机制：FallbackRule 确保全量覆盖
+   - 独立输出：生成 `session_texts.csv` 中间文件
+
+2. **Teacher 意图标注（简化版）**：
+   - **输入**：Session 文本（从 log-to-text 转换）
+   - **输出**：
+     - `intent_probs`: 11 维意图概率向量
+     - `primary_intent`: 主要意图名称
+     - `urgency_level`: 紧急度等级（high/medium/low）
+     - `confidence`: LLM 置信度（0.0-1.0）
+   - **关键变化**：
+     - ❌ 不再生成 `intent_embedding`（Teacher 不生成向量）
+     - ❌ 不再输出 `urgency_score`（改为 urgency_level）
+     - ✅ 只标注 10-20% 子集（分层采样）
+     - ✅ 成本降低 80-90%
+
+3. **Student 向量生成**：
+   - Student 模型从 Teacher 标注的子集学习
+   - Student 自行生成 intent_embedding（128-dim）
+   - 通过分类任务训练，不依赖 Teacher 的向量
 
 **质量保障**：
-- 质量指标：语义完整性、信息密度、可读性评分
+- 规则命中统计：了解哪些规则最常用
+- 转换质量监控：文本长度、成功率等指标
 - A/B 测试：支持多版本转换策略对比
 - 反馈循环：根据实际效果持续优化转换规则
 
-**使用示例**：
+**使用示例（优化后）**：
 ```python
-from src.features.log_to_text import LogToTextConverter
-from src.features.teacher_labeling import TeacherLabeling
-from src.features.embedding import EmbeddingGenerator
+# 使用新的规则引擎（推荐）
+from src.features.log_to_text_engine import LogToTextEngine, ConversionRuleRegistry
+from src.features.log_to_text_engine.rules import TemplateRule, AutomotiveRule, FallbackRule
+from src.features.log_to_text_engine.config import load_config
 
-# Log-to-Text 转换
-converter = LogToTextConverter()
-text = converter.convert(session)
+# 注册规则类型
+ConversionRuleRegistry.register("template", TemplateRule)
+ConversionRuleRegistry.register("automotive", AutomotiveRule)
+ConversionRuleRegistry.register("fallback", FallbackRule)
 
-# Teacher 标注
-teacher = TeacherLabeling()
-intent = teacher.label(text)
+# 加载配置并创建引擎
+config = load_config("config/log_to_text_rules.yaml")
+rules = [ConversionRuleRegistry.create_rule(rule_config) for rule_config in config["rules"]]
+engine = LogToTextEngine(rules=rules, mode=config["execution"]["mode"])
 
-# 向量生成
-embedder = EmbeddingGenerator()
-vector = embedder.generate(text, intent)
+# 转换 session
+result = engine.convert(session)
+print(result.text)
+
+# Teacher 标注（简化版）
+from src.agent.teacher_labeling import TeacherLabeler
+from src.agent.llm_client import create_llm_client
+
+llm_client = create_llm_client(provider="openai")
+teacher = TeacherLabeler(llm_client)
+
+# 标注单个 session
+label = teacher.label_session(session)
+print(label["intent_probs"])      # 11-dim 概率向量
+print(label["primary_intent"])    # 主要意图
+print(label["urgency_level"])     # high/medium/low
+print(label["confidence"])        # 0.0-1.0
+
+# 标注设备级别（批量）
+device_label = teacher.label_device(device_id, sessions)
+
+# Student 模型推理（生成向量）
+from src.model.intent_student_model import IntentStudentModel
+student = IntentStudentModel(input_dim=256, hidden_dim=64, intent_dim=11, embedding_dim=128)
+intent_probs, intent_embedding = student(session_features)
 ```
 
 #### 模块 C：弱监督标签挖掘 (Proxy Label Miner)
@@ -228,7 +318,7 @@ vector = embedder.generate(text, intent)
 **技术栈**：SQL / Spark / Python
 
 **核心文件**：
-- `src/training/proxy_label_miner.py` - 标签挖掘主逻辑
+- `src/labeling/proxy_label_miner.py` - 标签挖掘主逻辑
 
 **知识库**：
 - `src/knowledge/automotive_ontology.py` - 汽车领域本体知识库
@@ -236,16 +326,39 @@ vector = embedder.generate(text, intent)
   - 车型价格区间
   - 购车路径阶段
 
-**任务**：
-1. **Label 3 (正样本) 逻辑**：全渠道线索留资数据
-2. **Label 1/2 (负样本/中性) 逻辑**：资讯活跃但非点击、留资用户
+**任务（优化后）**：
+1. **4 级 Proxy Label 生成**：
+   - Label 0 (Noise): 无效数据
+   - Label 1 (Fans): 汽车爱好者，无购车意向
+   - Label 2 (Consider): 考虑购车，未采取行动
+   - Label 3 (Leads): 高意向用户，已留资或到店
 
-**使用示例**：
+2. **二分类标签转换**：
+   - `is_lead = 1`: Label 3（正样本）
+   - `is_lead = 0`: Label 0/1/2（负样本）
+   - 用于 SupCon 训练的二分类对比学习
+
+3. **标签分布统计**：
+   - 同时输出 4 级和二分类标签分布
+   - 确保标签平衡性
+
+**使用示例（优化后）**：
 ```python
-from src.training.proxy_label_miner import ProxyLabelMiner
+from src.labeling.proxy_label_miner import ProxyLabelMiner
 
 miner = ProxyLabelMiner()
-labels = miner.mine_labels(sessions, lead_data)
+
+# 挖掘标签（自动生成 proxy_label 和 is_lead）
+labels = miner.mine_labels(sessions)
+
+# 获取标签分布
+distribution = miner.get_label_distribution(labels)
+print(distribution["proxy_label"])  # 4 级分布
+print(distribution["is_lead"])      # 二分类分布
+
+# 单独转换标签
+is_lead = ProxyLabelMiner.convert_to_binary_label(proxy_label=3)  # 返回 1
+is_lead = ProxyLabelMiner.convert_to_binary_label(proxy_label=1)  # 返回 0
 ```
 
 #### 模块 D：对比学习训练算子 (Contrastive Learning Core)
@@ -255,33 +368,70 @@ labels = miner.mine_labels(sessions, lead_data)
 **技术栈**：PyTorch (CPU)
 
 **核心文件**：
-- `src/training/supcon_loss.py` - SupConLoss 实现
-- `src/training/projection_head.py` - 3 层 MLP Projection Head
-- `src/training/trainer.py` - 训练主流程
+- `src/model/supcon_loss.py` - SupConLoss 实现
+- `src/model/projection_head.py` - 3 层 MLP Projection Head
+- `src/model/trainer.py` - 训练主流程（优化版）
 
 **Student Model**（轻量级推理）：
-- `src/training/intent_student_model.py` - Student 模型定义
-- `src/training/train_student_model.py` - Student 训练脚本
-- `src/training/distillation_loss.py` - 知识蒸馏损失函数
+- `src/model/intent_student_model.py` - Student 模型定义
+- `src/model/train_student_model.py` - Student 训练脚本（优化版）
+- `src/model/distillation_loss.py` - 知识蒸馏损失函数（简化版）
 
-**任务**：
-1. 实现 SupConLoss 类（温度参数 0.07）
-2. 构建 Projection Head：3 层 MLP，256 维 → 128 维
-3. 拉扯逻辑：同 Label 样本聚类，异类样本推开
+**任务（优化后）**：
+1. **Student 模型训练**：
+   - 从 Teacher 标注的 10-20% 子集学习
+   - 只使用分类损失（移除 embedding 损失）
+   - 输出：intent_probs (11-dim) + intent_embedding (128-dim)
+   - Student 的 embedding 通过分类任务自行学习
 
-**使用示例**：
+2. **SupCon 训练**：
+   - 使用二分类 lead/non-lead 标签（不再使用 11 类意图标签）
+   - 温度参数 0.07
+   - 平衡采样：确保每个 batch 中 lead/non-lead 比例均衡
+   - 目标：lead 用户聚集，non-lead 用户聚集，两类分离
+
+3. **Projection Head**：
+   - 3 层 MLP：256 维 → 128 维
+   - L2 归一化输出
+
+**使用示例（优化后）**：
 ```python
-from src.training.supcon_loss import SupConLoss
-from src.training.projection_head import ProjectionHead
-from src.training.trainer import Trainer
+# Student 模型训练（简化版）
+from src.model.train_student_model import train_student_model_cpu, stratified_sample_for_teacher_labeling
 
-# 初始化模型
-projection_head = ProjectionHead(input_dim=256, output_dim=128)
-loss_fn = SupConLoss(temperature=0.07)
+# 分层采样（15% 子集）
+sampled_df = stratified_sample_for_teacher_labeling(
+    sessions_df,
+    sample_ratio=0.15,
+    stratify_column='proxy_label'
+)
 
-# 训练
-trainer = Trainer(projection_head, loss_fn)
-trainer.train(train_data, labels)
+# 训练 Student（只使用分类损失）
+train_student_model_cpu(
+    train_data_path="teacher_labeled_subset.csv",
+    model_save_path="student_model.pth",
+    epochs=30,
+    batch_size=32,
+    learning_rate=0.001
+)
+
+# SupCon 训练（二分类标签）
+from src.model.trainer import train_supcon_model_cpu
+
+train_supcon_model_cpu(
+    train_data_path="labeled_sessions.csv",  # 全量数据，包含 is_lead 列
+    model_save_path="supcon_model.pth",
+    epochs=30,
+    batch_size=16,
+    learning_rate=0.001,
+    temperature=0.07,
+    use_balanced_sampling=True  # 平衡采样
+)
+
+# 推理
+from src.model.intent_student_model import IntentStudentModel
+student = IntentStudentModel(input_dim=256, hidden_dim=64, intent_dim=11, embedding_dim=128)
+intent_probs, intent_embedding = student(session_features)
 ```
 
 #### 模块 E：在线推理服务 (Serving)
@@ -291,23 +441,67 @@ trainer.train(train_data, labels)
 **技术栈**：Flask
 
 **核心文件**：
-- `src/serving/api.py` - Flask API 服务
-- `src/serving/inference.py` - 推理逻辑
+- `src/serving/api.py` - Flask API 服务（v2 API）
+- `src/serving/inference.py` - 推理逻辑（优化版）
 
-**API 端点**：
+**API 端点（v2）**：
 - `GET /health` - 健康检查
-- `POST /predict` - 单样本预测
+- `POST /predict` - 单样本预测（返回意图特征 + lead 评分）
 - `POST /batch_predict` - 批量预测
 
-**使用示例**：
+**API 响应格式（v2）**：
+```json
+{
+  "device_id": "device_000001",
+  "intent_features": {
+    "intent_probs": [0.8, 0.1, ...],      // 11-dim 概率向量
+    "intent_embedding": [...],             // 128-dim 向量
+    "primary_intent": "automotive_purchase",
+    "urgency_level": "high"                // high/medium/low
+  },
+  "lead_score": 0.85,                      // 从对比空间计算
+  "timestamp": 1234567890,
+  "api_version": "v2"
+}
+```
+
+**关键变化**：
+- ✅ 强调 `intent_features` 输出（概率 + 向量 + 主要意图 + 紧急度）
+- ✅ `lead_score` 作为辅助输出
+- ✅ 添加 `api_version: "v2"` 标识
+- ✅ 自动从概率提取 `primary_intent` 和 `urgency_level`
+
+**使用示例（优化后）**：
 ```bash
 # 启动服务
 python src/serving/api.py
 
-# 调用 API
+# 单样本预测（v2 API）
 curl -X POST http://localhost:5000/predict \
   -H "Content-Type: application/json" \
-  -d '{"session": {...}}'
+  -d '{
+    "session": {
+      "device_id": "device_001",
+      "app_switch_freq": 5,
+      "config_page_dwell": 180,
+      "finance_page_dwell": 60,
+      "session_duration": 300
+    }
+  }'
+
+# 响应示例
+{
+  "device_id": "device_001",
+  "intent_features": {
+    "intent_probs": [0.8, 0.1, 0.0, ...],
+    "intent_embedding": [0.23, -0.45, ...],
+    "primary_intent": "automotive_purchase",
+    "urgency_level": "high"
+  },
+  "lead_score": 0.85,
+  "timestamp": 1234567890,
+  "api_version": "v2"
+}
 ```
 
 ### Support Systems
@@ -377,32 +571,76 @@ intent = labeler.label_with_knowledge(session)
 
 ### Data Flow
 
-#### 实时链路（生产方案）
+#### 离线训练链路（优化后）
 
 ```
-端侧用户行为数据上报
-  ↓
-Flink 数据清洗完成 session 切片
-  ↓
-Flink 完成 log_to_text 以及原始向量生成
-  ↓
-原始向量通过新的损失函数进行纠偏，让正负样本分别聚集
-  ↓
-传递用户意图特征向量给推荐引擎
+1. Session 切片
+   用户历史行为数据 → Session 切片器 → sessions.csv
+
+2. Log-to-Text 转换
+   sessions.csv → 规则引擎 → session_texts.csv
+
+3. Proxy Label 挖掘（全量）
+   sessions.csv → 业务规则 → labeled_sessions.csv (含 is_lead)
+
+4. Teacher 标注（15% 子集）
+   labeled_sessions.csv → 分层采样 → 15% 子集
+   15% 子集 + session_texts → LLM → teacher_labeled.csv
+   输出：intent_probs, primary_intent, urgency_level, confidence
+
+5. Student 训练（知识蒸馏）
+   teacher_labeled.csv → Student 模型 → student_model.pth
+   损失：只使用分类损失（BCE）
+   输出：intent_probs (11-dim) + intent_embedding (128-dim)
+
+6. SupCon 训练（二分类标签，全量）
+   labeled_sessions.csv (含 is_lead) → SupCon 模型 → supcon_model.pth
+   标签：二分类 lead/non-lead
+   采样：平衡采样确保 batch 中 lead/non-lead 比例均衡
+
+7. 模型验证
+   验证 Student 和 SupCon 模型性能
 ```
+
+**关键优化点**：
+- ✅ Teacher 只标注 15% 子集（成本降低 85%）
+- ✅ SupCon 使用全量数据和二分类标签（更好的聚类效果）
+- ✅ Student 从子集学习，泛化到全量数据
+- ✅ 清晰的数据流：Proxy Labels → Teacher Subset → Student → SupCon
+
+#### 实时推理链路（生产方案）
+
+```
+用户行为数据上报
+  ↓
+Session 切片（Flink/实时）
+  ↓
+Log-to-Text 转换（规则引擎）
+  ↓
+Student 模型推理
+  输出：intent_probs (11-dim) + intent_embedding (128-dim)
+  ↓
+SupCon 模型推理
+  输入：session_features (256-dim)
+  输出：projection (128-dim 对比空间向量)
+  ↓
+计算 lead_score（与 lead 中心的相似度）
+  ↓
+返回结果：
+  - intent_features (probs + embedding + primary_intent + urgency_level)
+  - lead_score
+  ↓
+传递给推荐引擎/业务系统
+```
+
+**推理性能**：
+- CPU 推理：<1ms
+- 无需 GPU
+- 适合边缘设备和大规模部署
 
 **可追溯性**：每个环节都有 trace_id 记录
 **质量门禁**：每个环节都有验证检查
 **异常处理**：自动检测和告警机制
-
-#### 离线链路（验证方案）
-
-```
-现有已采集的用户历史行为数据
-  ↓
-Spark 数据清洗完成 session 切片
-  ↓
-Spark 完成 log_to_text 以及原始向量生成
   ↓
 原始向量通过新的损失函数进行纠偏，让正负样本分别聚集生成纠偏后意图向量
   ↓
@@ -545,6 +783,51 @@ python scripts/generate_mock_data.py --num_users 1000 --num_events 10000
 
 # 运行完整训练流程
 python scripts/offline_training_pipeline.py
+```
+
+### Log-to-Text 转换
+
+```bash
+# 使用默认配置转换
+python scripts/convert_sessions_to_text.py \
+  --input data/processed/sessions.csv \
+  --output data/processed/session_texts.csv
+
+# 使用自定义配置
+python scripts/convert_sessions_to_text.py \
+  --input data/processed/sessions.csv \
+  --output data/processed/session_texts.csv \
+  --config config/log_to_text_rules.yaml
+
+# 不显示进度条
+python scripts/convert_sessions_to_text.py \
+  --input data/processed/sessions.csv \
+  --output data/processed/session_texts.csv \
+  --no-progress
+
+# 生成示例配置文件
+python -c "from src.features.log_to_text_engine.config import create_example_config; create_example_config('config/my_rules.yaml')"
+
+# 测试规则引擎
+python -c "
+from src.features.log_to_text_engine import LogToTextEngine, ConversionRuleRegistry
+from src.features.log_to_text_engine.rules import TemplateRule, AutomotiveRule, FallbackRule
+from src.features.log_to_text_engine.config import load_config
+
+# 注册规则
+ConversionRuleRegistry.register('template', TemplateRule)
+ConversionRuleRegistry.register('automotive', AutomotiveRule)
+ConversionRuleRegistry.register('fallback', FallbackRule)
+
+# 加载配置
+config = load_config()
+rules = [ConversionRuleRegistry.create_rule(r) for r in config['rules']]
+engine = LogToTextEngine(rules=rules)
+
+# 打印规则摘要
+import json
+print(json.dumps(engine.get_rule_summary(), indent=2))
+"
 ```
 
 ### 模型训练和验证

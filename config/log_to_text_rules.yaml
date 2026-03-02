@@ -1,0 +1,50 @@
+rules:
+- id: automotive_rule
+  type: automotive
+  enabled: true
+  priority: 100
+  params: {}
+  description: 汽车领域专用规则（最高优先级）
+- id: template_automotive_config
+  type: template
+  enabled: true
+  priority: 90
+  params:
+    template: 用户在 {{ session_duration | format_duration }} 内使用了 {{ app_pkg_list |
+      format_app_list }}，在配置页停留了 {{ config_page_dwell // 60 }} 分钟，{% if lbs_poi_list
+      %}位置：{{ lbs_poi_list | format_poi }}，{% endif %}显示出购车配置意向。
+    match_conditions:
+      app_category: automotive
+      min_config_dwell: 60
+  description: 模板规则：汽车类应用 + 配置页
+- id: template_automotive_finance
+  type: template
+  enabled: true
+  priority: 85
+  params:
+    template: 用户在 {{ session_duration | format_duration }} 内使用了 {{ app_pkg_list |
+      format_app_list }}，在金融页停留了 {{ finance_page_dwell // 60 }} 分钟，{% if lbs_poi_list
+      %}位置：{{ lbs_poi_list | format_poi }}，{% endif %}显示出汽车金融意向。
+    match_conditions:
+      app_category: automotive
+      min_finance_dwell: 30
+  description: 模板规则：汽车类应用 + 金融页
+- id: template_general
+  type: template
+  enabled: true
+  priority: 50
+  params:
+    template: 用户在 {{ session_duration | format_duration }} 内使用了 {{ app_pkg_list |
+      format_app_list }}{% if app_switch_freq > 5 %}（频繁切换，共 {{ app_switch_freq }}
+      次）{% endif %}{% if lbs_poi_list %}，位置：{{ lbs_poi_list | format_poi }}{% endif
+      %}。
+    match_conditions: {}
+  description: 通用模板规则
+- id: fallback
+  type: fallback
+  enabled: true
+  priority: 0
+  params: {}
+  description: 兜底规则（最低优先级，确保全量覆盖）
+execution:
+  mode: first_match

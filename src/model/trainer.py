@@ -1,13 +1,14 @@
 """SupCon 模型训练脚本（CPU 优化）
 
 使用 Supervised Contrastive Loss 训练 Projection Head。
+基于二分类 lead/non-lead 标签进行对比学习。
 """
 
 import sys
 from pathlib import Path
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import pandas as pd
 import numpy as np
 
@@ -20,33 +21,35 @@ from src.model.supcon_loss import SupConLoss
 
 
 class SupConDataset(Dataset):
-    """SupCon 训练数据集"""
+    """SupCon 训练数据集 - 基于二分类 lead/non-lead 标签"""
 
     def __init__(self, data_path: str):
         """
         初始化数据集
 
         Args:
-            data_path: 数据文件路径（CSV 格式）
+            data_path: 数据文件路径（CSV 格式，设备级别数据）
         """
         self.df = pd.read_csv(data_path)
 
         # 提取特征和标签
         self.vectors = self._extract_vectors()
-        self.labels = self._extract_labels()
+        self.labels = self._extract_lead_labels()
+
+        # 统计标签分布
+        self._print_label_distribution()
 
     def _extract_vectors(self) -> torch.Tensor:
-        """提取融合向量（256-dim）"""
-        # 简化版本：使用基础特征
+        """提取设备特征向量（256-dim）"""
         vectors = []
         for _, row in self.df.iterrows():
+            # 使用 urgency_level 替代 urgency_score
+            urgency_value = self._urgency_level_to_float(row.get("urgency_level", "low"))
+
             vector = [
-                float(row.get("app_switch_freq", 0)),
-                float(row.get("config_page_dwell", 0)) / 60.0,
-                float(row.get("finance_page_dwell", 0)) / 60.0,
-                float(row.get("time_tension_bucket", 0)),
-                float(row.get("session_duration", 0)) / 3600.0,
-                float(row.get("event_count", 0)) / 100.0,
+                float(row.get("session_count", 0)) / 100.0,  # 归一化 session 数量
+                float(row.get("total_duration", 0)) / 3600.0,  # 归一化总时长（小时）
+                urgency_value,  # 归一化紧急度
             ]
             # 填充到 256 维
             while len(vector) < 256:
@@ -55,14 +58,35 @@ class SupConDataset(Dataset):
 
         return torch.tensor(vectors, dtype=torch.float32)
 
-    def _extract_labels(self) -> torch.Tensor:
-        """提取标签"""
+    def _urgency_level_to_float(self, urgency_level: str) -> float:
+        """将 urgency_level 转换为浮点数"""
+        mapping = {"high": 1.0, "medium": 0.5, "low": 0.0}
+        return mapping.get(str(urgency_level).lower(), 0.0)
+
+    def _extract_lead_labels(self) -> torch.Tensor:
+        """提取二分类 lead/non-lead 标签"""
         labels = []
         for _, row in self.df.iterrows():
-            label = int(row.get("proxy_label", 0))
-            labels.append(label)
+            # 优先使用 is_lead 列，如果不存在则从 proxy_label 转换
+            if "is_lead" in self.df.columns:
+                is_lead = int(row.get("is_lead", 0))
+            else:
+                # 从 proxy_label 转换：Label 3 → 1 (lead), 其他 → 0 (non-lead)
+                proxy_label = int(row.get("proxy_label", 0))
+                is_lead = 1 if proxy_label == 3 else 0
+
+            labels.append(is_lead)
 
         return torch.tensor(labels, dtype=torch.long)
+
+    def _print_label_distribution(self):
+        """打印标签分布"""
+        unique, counts = torch.unique(self.labels, return_counts=True)
+        print("\n标签分布：")
+        for label, count in zip(unique.tolist(), counts.tolist()):
+            label_name = "Lead" if label == 1 else "Non-lead"
+            percentage = count / len(self.labels) * 100
+            print(f"  {label_name} (label={label}): {count} ({percentage:.2f}%)")
 
     def __len__(self):
         return len(self.df)
@@ -79,9 +103,10 @@ def train_supcon_model_cpu(
     batch_size: int = 16,
     learning_rate: float = 0.001,
     temperature: float = 0.07,
+    use_balanced_sampling: bool = True,
 ):
     """
-    CPU 训练 SupCon 模型
+    CPU 训练 SupCon 模型（使用二分类 lead/non-lead 标签）
 
     Args:
         train_data_path: 训练数据路径
@@ -91,9 +116,10 @@ def train_supcon_model_cpu(
         batch_size: 批次大小
         learning_rate: 学习率
         temperature: SupCon 温度参数
+        use_balanced_sampling: 是否使用平衡采样（确保每个 batch 中 lead/non-lead 比例均衡）
     """
     print("=" * 60)
-    print("SupCon 模型训练（CPU）")
+    print("SupCon 模型训练（CPU）- 二分类 Lead/Non-lead")
     print("=" * 60)
 
     # 强制使用 CPU
@@ -103,10 +129,28 @@ def train_supcon_model_cpu(
     # 数据加载
     print(f"\n加载训练数据：{train_data_path}")
     train_dataset = SupConDataset(train_data_path)
+
+    # 创建平衡采样器（可选）
+    sampler = None
+    if use_balanced_sampling:
+        print("\n使用平衡采样器（确保 lead/non-lead 比例均衡）...")
+        # 计算每个类别的权重
+        labels = train_dataset.labels.numpy()
+        class_counts = np.bincount(labels)
+        class_weights = 1.0 / class_counts
+        sample_weights = class_weights[labels]
+
+        sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True
+        )
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(sampler is None),  # 如果使用 sampler 则不 shuffle
+        sampler=sampler,
         num_workers=4,  # CPU 多线程加速
         pin_memory=False,  # CPU 不需要 pin_memory
     )
@@ -115,7 +159,7 @@ def train_supcon_model_cpu(
     # 验证数据（可选）
     val_loader = None
     if val_data_path:
-        print(f"加载验证数据：{val_data_path}")
+        print(f"\n加载验证数据：{val_data_path}")
         val_dataset = SupConDataset(val_data_path)
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, num_workers=4

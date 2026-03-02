@@ -1,6 +1,7 @@
 """Student Model 训练脚本（CPU 优化）
 
 使用知识蒸馏训练轻量级 Student Model。
+支持从 Teacher 标注的子集（10-20%）进行训练。
 """
 
 import sys
@@ -10,6 +11,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import train_test_split
 
 # 添加项目根目录到 Python 路径
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -19,8 +21,55 @@ from src.model.intent_student_model import create_student_model
 from src.model.distillation_loss import IntentDistillationLoss
 
 
+def stratified_sample_for_teacher_labeling(
+    sessions_df: pd.DataFrame,
+    sample_ratio: float = 0.15,
+    stratify_column: str = "proxy_label",
+    random_state: int = 42
+) -> pd.DataFrame:
+    """对 sessions 进行分层采样，选择子集用于 Teacher 标注。
+
+    Args:
+        sessions_df: 完整的 sessions DataFrame
+        sample_ratio: 采样比例（默认 15%，即 10-20% 范围内）
+        stratify_column: 用于分层的列名（默认使用 proxy_label）
+        random_state: 随机种子
+
+    Returns:
+        采样后的 DataFrame
+    """
+    print(f"\n执行分层采样（采样比例：{sample_ratio*100:.1f}%）...")
+    print(f"分层依据：{stratify_column}")
+
+    # 确保分层列存在
+    if stratify_column not in sessions_df.columns:
+        print(f"警告：{stratify_column} 列不存在，使用随机采样")
+        return sessions_df.sample(frac=sample_ratio, random_state=random_state)
+
+    # 分层采样
+    sampled_df, _ = train_test_split(
+        sessions_df,
+        train_size=sample_ratio,
+        stratify=sessions_df[stratify_column],
+        random_state=random_state
+    )
+
+    print(f"原始样本数：{len(sessions_df)}")
+    print(f"采样后样本数：{len(sampled_df)}")
+
+    # 显示标签分布
+    if stratify_column in sampled_df.columns:
+        print(f"\n采样后的 {stratify_column} 分布：")
+        distribution = sampled_df[stratify_column].value_counts().sort_index()
+        for label, count in distribution.items():
+            percentage = count / len(sampled_df) * 100
+            print(f"  Label {label}: {count} ({percentage:.2f}%)")
+
+    return sampled_df
+
+
 class IntentDistillationDataset(Dataset):
-    """知识蒸馏数据集"""
+    """知识蒸馏数据集 - 支持设备级别的数据（简化版，不使用 Teacher embedding）"""
 
     def __init__(self, data_path: str):
         """
@@ -32,22 +81,19 @@ class IntentDistillationDataset(Dataset):
         self.df = pd.read_csv(data_path)
 
         # 提取特征和标签
-        self.session_features = self._extract_session_features()
+        self.device_features = self._extract_device_features()
         self.teacher_probs = self._extract_teacher_probs()
-        self.teacher_embeddings = self._extract_teacher_embeddings()
 
-    def _extract_session_features(self) -> torch.Tensor:
-        """提取 Session 特征（256-dim）"""
-        # 简化版本：使用基础特征
+    def _extract_device_features(self) -> torch.Tensor:
+        """提取设备特征（256-dim）"""
+        # 简化版本：使用设备级别的基础特征
         features = []
         for _, row in self.df.iterrows():
             feature = [
-                float(row.get("app_switch_freq", 0)),
-                float(row.get("config_page_dwell", 0)) / 60.0,
-                float(row.get("finance_page_dwell", 0)) / 60.0,
-                float(row.get("time_tension_bucket", 0)),
-                float(row.get("session_duration", 0)) / 3600.0,
-                float(row.get("event_count", 0)) / 100.0,
+                float(row.get("session_count", 0)) / 100.0,  # 归一化 session 数量
+                float(row.get("total_duration", 0)) / 3600.0,  # 归一化总时长（小时）
+                # urgency_level 转换为数值：high=1.0, medium=0.5, low=0.0
+                self._urgency_level_to_float(row.get("urgency_level", "low")),
             ]
             # 填充到 256 维
             while len(feature) < 256:
@@ -56,48 +102,35 @@ class IntentDistillationDataset(Dataset):
 
         return torch.tensor(features, dtype=torch.float32)
 
+    def _urgency_level_to_float(self, urgency_level: str) -> float:
+        """将 urgency_level 转换为浮点数"""
+        mapping = {"high": 1.0, "medium": 0.5, "low": 0.0}
+        return mapping.get(str(urgency_level).lower(), 0.0)
+
     def _extract_teacher_probs(self) -> torch.Tensor:
         """提取 Teacher 的意图概率（11-dim）"""
         probs = []
         for _, row in self.df.iterrows():
-            # 从 intent_vector 列解析
-            intent_vector_str = row.get("intent_vector", "[0.0]*11")
+            # 从 intent_probs 列解析（新格式）
+            intent_probs_str = row.get("intent_probs", row.get("intent_vector", "[0.0]*11"))
             try:
-                intent_vector = eval(intent_vector_str)
-                if len(intent_vector) != 11:
-                    intent_vector = [0.0] * 11
+                intent_probs = eval(intent_probs_str)
+                if len(intent_probs) != 11:
+                    intent_probs = [0.0] * 11
             except:
-                intent_vector = [0.0] * 11
+                intent_probs = [0.0] * 11
 
-            probs.append(intent_vector)
+            probs.append(intent_probs)
 
         return torch.tensor(probs, dtype=torch.float32)
-
-    def _extract_teacher_embeddings(self) -> torch.Tensor:
-        """提取 Teacher 的意图向量（128-dim）"""
-        embeddings = []
-        for _, row in self.df.iterrows():
-            # 从 intent_embedding 列解析
-            intent_embedding_str = row.get("intent_embedding", "[0.0]*128")
-            try:
-                intent_embedding = eval(intent_embedding_str)
-                if len(intent_embedding) != 128:
-                    intent_embedding = [0.0] * 128
-            except:
-                intent_embedding = [0.0] * 128
-
-            embeddings.append(intent_embedding)
-
-        return torch.tensor(embeddings, dtype=torch.float32)
 
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         return (
-            self.session_features[idx],
+            self.device_features[idx],
             self.teacher_probs[idx],
-            self.teacher_embeddings[idx],
         )
 
 
@@ -108,10 +141,9 @@ def train_student_model_cpu(
     epochs: int = 30,
     batch_size: int = 32,
     learning_rate: float = 0.001,
-    alpha: float = 0.5,
 ):
     """
-    CPU 训练 Student Model
+    CPU 训练 Student Model（简化版，不使用 Teacher embedding）
 
     Args:
         train_data_path: 训练数据路径
@@ -120,7 +152,6 @@ def train_student_model_cpu(
         epochs: 训练轮数
         batch_size: 批次大小
         learning_rate: 学习率
-        alpha: 蒸馏损失权重
     """
     print("=" * 60)
     print("Student Model 训练（CPU）")
@@ -157,8 +188,8 @@ def train_student_model_cpu(
         input_dim=256, hidden_dim=64, intent_dim=11, embedding_dim=128, dropout=0.2
     ).to(device)
 
-    # 损失函数和优化器
-    criterion = IntentDistillationLoss(alpha=alpha)
+    # 损失函数和优化器（简化版，只使用分类损失）
+    criterion = IntentDistillationLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # 训练循环
@@ -169,28 +200,16 @@ def train_student_model_cpu(
         # 训练阶段
         model.train()
         train_loss = 0.0
-        train_cls_loss = 0.0
-        train_emb_loss = 0.0
 
-        for batch_idx, (session_features, teacher_probs, teacher_embedding) in enumerate(
-            train_loader
-        ):
+        for batch_idx, (session_features, teacher_probs) in enumerate(train_loader):
             session_features = session_features.to(device)
             teacher_probs = teacher_probs.to(device)
-            teacher_embedding = teacher_embedding.to(device)
 
             # Forward
             student_probs, student_embedding = model(session_features)
 
-            # Loss
-            loss = criterion(
-                student_probs, student_embedding, teacher_probs, teacher_embedding
-            )
-
-            # 获取损失组成部分
-            loss_components = criterion.get_loss_components(
-                student_probs, student_embedding, teacher_probs, teacher_embedding
-            )
+            # Loss（只使用分类损失）
+            loss = criterion(student_probs, teacher_probs)
 
             # Backward
             optimizer.zero_grad()
@@ -198,12 +217,8 @@ def train_student_model_cpu(
             optimizer.step()
 
             train_loss += loss.item()
-            train_cls_loss += loss_components["classification_loss"]
-            train_emb_loss += loss_components["embedding_loss"]
 
         avg_train_loss = train_loss / len(train_loader)
-        avg_train_cls_loss = train_cls_loss / len(train_loader)
-        avg_train_emb_loss = train_emb_loss / len(train_loader)
 
         # 验证阶段
         val_loss_str = ""
@@ -211,15 +226,12 @@ def train_student_model_cpu(
             model.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for session_features, teacher_probs, teacher_embedding in val_loader:
+                for session_features, teacher_probs in val_loader:
                     session_features = session_features.to(device)
                     teacher_probs = teacher_probs.to(device)
-                    teacher_embedding = teacher_embedding.to(device)
 
                     student_probs, student_embedding = model(session_features)
-                    loss = criterion(
-                        student_probs, student_embedding, teacher_probs, teacher_embedding
-                    )
+                    loss = criterion(student_probs, teacher_probs)
                     val_loss += loss.item()
 
             avg_val_loss = val_loss / len(val_loader)
@@ -234,8 +246,7 @@ def train_student_model_cpu(
 
         print(
             f"Epoch {epoch+1}/{epochs} - "
-            f"Train Loss: {avg_train_loss:.4f} "
-            f"(Cls: {avg_train_cls_loss:.4f}, Emb: {avg_train_emb_loss:.4f})"
+            f"Train Loss: {avg_train_loss:.4f}"
             f"{val_loss_str}"
         )
 
@@ -264,7 +275,6 @@ def main():
         epochs=30,
         batch_size=32,
         learning_rate=0.001,
-        alpha=0.5,
     )
 
 

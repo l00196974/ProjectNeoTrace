@@ -28,16 +28,47 @@ class ProxyLabelMiner:
             sessions: Session 列表
 
         Returns:
-            带标签的 Session 列表
+            带标签的 Session 列表（包含 proxy_label 和 is_lead）
         """
         labeled_sessions = []
 
         for session in sessions:
             label = self._determine_label(session)
-            session_with_label = {**session, "proxy_label": label}
+            is_lead = self.convert_to_binary_label(label)
+            session_with_label = {
+                **session,
+                "proxy_label": label,
+                "is_lead": is_lead
+            }
             labeled_sessions.append(session_with_label)
 
         return labeled_sessions
+
+    @staticmethod
+    def convert_to_binary_label(proxy_label: int) -> int:
+        """将 3 级代理标签转换为二分类标签。
+
+        Args:
+            proxy_label: 代理标签 (0/1/2/3)
+
+        Returns:
+            二分类标签：
+            - 1: Lead (proxy_label == 3)
+            - 0: Non-lead (proxy_label in [0, 1, 2])
+        """
+        return 1 if proxy_label == 3 else 0
+
+    @staticmethod
+    def convert_to_binary_labels(proxy_labels: List[int]) -> List[int]:
+        """批量转换代理标签为二分类标签。
+
+        Args:
+            proxy_labels: 代理标签列表
+
+        Returns:
+            二分类标签列表
+        """
+        return [ProxyLabelMiner.convert_to_binary_label(label) for label in proxy_labels]
 
     def _determine_label(self, session: Dict) -> int:
         """
@@ -168,23 +199,34 @@ class ProxyLabelMiner:
 
         return has_automotive_app and has_duration
 
-    def get_label_distribution(self, labeled_sessions: List[Dict]) -> Dict[int, int]:
+    def get_label_distribution(self, labeled_sessions: List[Dict]) -> Dict[str, Dict[int, int]]:
         """
-        获取标签分布
+        获取标签分布（包括代理标签和二分类标签）
 
         Args:
             labeled_sessions: 带标签的 Session 列表
 
         Returns:
-            标签分布字典
+            标签分布字典：
+            {
+                "proxy_label": {0: count, 1: count, 2: count, 3: count},
+                "is_lead": {0: count, 1: count}
+            }
         """
-        distribution = {0: 0, 1: 0, 2: 0, 3: 0}
+        proxy_distribution = {0: 0, 1: 0, 2: 0, 3: 0}
+        binary_distribution = {0: 0, 1: 0}
 
         for session in labeled_sessions:
-            label = session.get("proxy_label", 0)
-            distribution[label] = distribution.get(label, 0) + 1
+            proxy_label = session.get("proxy_label", 0)
+            is_lead = session.get("is_lead", 0)
 
-        return distribution
+            proxy_distribution[proxy_label] = proxy_distribution.get(proxy_label, 0) + 1
+            binary_distribution[is_lead] = binary_distribution.get(is_lead, 0) + 1
+
+        return {
+            "proxy_label": proxy_distribution,
+            "is_lead": binary_distribution
+        }
 
 
 def main():
@@ -218,7 +260,7 @@ def main():
     # 统计标签分布
     distribution = miner.get_label_distribution(labeled_sessions)
 
-    print("\n标签分布：")
+    print("\n代理标签分布（4 级）：")
     label_names = {
         0: "Label 0 (Noise)",
         1: "Label 1 (Fans)",
@@ -226,9 +268,19 @@ def main():
         3: "Label 3 (Leads)",
     }
 
-    for label, count in sorted(distribution.items()):
+    for label, count in sorted(distribution["proxy_label"].items()):
         percentage = count / len(labeled_sessions) * 100
         print(f"  {label_names[label]}: {count} ({percentage:.2f}%)")
+
+    print("\n二分类标签分布：")
+    binary_names = {
+        0: "Non-lead",
+        1: "Lead",
+    }
+
+    for label, count in sorted(distribution["is_lead"].items()):
+        percentage = count / len(labeled_sessions) * 100
+        print(f"  {binary_names[label]}: {count} ({percentage:.2f}%)")
 
     # 保存结果
     output_file = PROJECT_ROOT / "data" / "processed" / "labeled_sessions_sample.csv"

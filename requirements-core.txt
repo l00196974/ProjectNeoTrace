@@ -1,0 +1,27 @@
+# 核心依赖 - 最小化安装
+# PyTorch CPU 版本
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+torchvision
+
+# NLP 和向量化
+sentence-transformers
+transformers
+
+# 数据处理
+pandas
+numpy
+scikit-learn
+
+# Web 服务
+flask
+flask-cors
+
+# 工具库
+python-dotenv
+pyyaml
+tqdm
+loguru
+
+# 测试
+pytest

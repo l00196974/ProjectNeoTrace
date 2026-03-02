@@ -1,0 +1,66 @@
+# Session 切片规则配置
+#
+# 此配置文件定义了用于识别 Session 边界的规则
+# 规则按优先级从高到低执行
+
+rules:
+  # 规则 1: 息屏超时规则
+  - id: screen_off_rule
+    type: screen_off
+    enabled: true
+    priority: 100
+    params:
+      threshold_seconds: 600  # 息屏阈值（秒），默认 10 分钟
+
+  # 规则 2: LBS 地标跨越规则
+  - id: lbs_crossing_rule
+    type: lbs_crossing
+    enabled: true
+    priority: 50
+    params:
+      poi_hierarchy:
+        home: 1
+        office: 1
+        auto_market: 2
+        4s_store: 2
+        shopping_mall: 1
+        restaurant: 1
+        gas_station: 1
+
+  # 规则 3: 应用类目跳变规则
+  - id: app_category_rule
+    type: app_category_change
+    enabled: true
+    priority: 30
+    params:
+      category_map:
+        # 汽车类
+        com.autohome: automotive
+        com.yiche: automotive
+        com.bitauto: automotive
+        com.xcar: automotive
+        com.pcauto: automotive
+        # 社交类
+        com.tencent.mm: social
+        com.tencent.mobileqq: social
+        com.sina.weibo: social
+        com.tencent.wework: social
+        # 外卖类
+        com.sankuai.meituan: food_delivery
+        me.ele: food_delivery
+        # 电商类
+        com.taobao.taobao: shopping
+        com.jingdong.app.mall: shopping
+        com.xunmeng.pinduoduo: shopping
+        # 娱乐类
+        com.ss.android.ugc.aweme: entertainment
+        com.tencent.qqlive: entertainment
+        com.youku.phone: entertainment
+        # 金融类
+        com.tencent.wemoney.app: finance
+        com.eg.android.AlipayGphone: finance
+        com.chinamworld.main: finance
+
+# 执行配置
+execution:
+  mode: chain  # 执行模式: "chain" (首个匹配即停止) 或 "all" (执行所有规则)

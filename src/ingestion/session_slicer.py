@@ -128,7 +128,7 @@ class SessionSlicer:
 
         sessions = []
         current_session_events = []
-        state_machine = SessionStateMachine(self.screen_off_threshold)
+        state_machine = SessionStateMachine(screen_off_threshold=self.screen_off_threshold)
 
         for event in events:
             # 判断是否开始新 Session
@@ -219,6 +219,30 @@ class SessionSlicer:
 
         return dict(device_events)
 
+    def save_to_csv(self, sessions: List[SessionDict], output_file: str) -> None:
+        """保存 Session 到 CSV 文件。
+
+        Args:
+            sessions: Session 列表
+            output_file: 输出文件路径
+        """
+        if not sessions:
+            print("警告：没有 Session 数据可保存")
+            return
+
+        # 转换为 DataFrame
+        df = pd.DataFrame(sessions)
+
+        # 确保输出目录存在
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # 保存为 CSV
+        df.to_csv(output_file, index=False, encoding='utf-8')
+        print(f"Session 数据已保存到：{output_file}")
+        print(f"  行数：{len(df)}")
+        print(f"  列数：{len(df.columns)}")
+
     def save_to_parquet(self, sessions: List[SessionDict], output_file: str) -> None:
         """保存 Session 到 Parquet 文件。
 
@@ -237,16 +261,9 @@ class SessionSlicer:
         output_path = Path(output_file)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 尝试保存为 Parquet，如果失败则保存为 CSV
-        try:
-            df.to_parquet(output_file, index=False)
-            print(f"Session 数据已保存到：{output_file}")
-        except ImportError:
-            # 如果没有 pyarrow，保存为 CSV
-            csv_file = output_file.replace(".parquet", ".csv")
-            df.to_csv(csv_file, index=False)
-            print(f"Session 数据已保存到：{csv_file}（CSV 格式）")
-
+        # 保存为 Parquet
+        df.to_parquet(output_file, index=False)
+        print(f"Session 数据已保存到：{output_file}")
         print(f"  行数：{len(df)}")
         print(f"  列数：{len(df.columns)}")
 

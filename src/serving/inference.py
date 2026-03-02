@@ -111,14 +111,24 @@ class ProductionInference:
         self, session_text: str, session_features: np.ndarray
     ) -> Dict:
         """
-        预测 lead_score
+        预测意图特征和 lead_score
 
         Args:
             session_text: Session 文本描述
             session_features: Session 特征（256-dim）
 
         Returns:
-            预测结果字典
+            预测结果字典：
+            {
+                "intent_features": {
+                    "intent_probs": [11-dim 概率向量],
+                    "intent_embedding": [128-dim 向量],
+                    "primary_intent": "automotive_purchase",
+                    "urgency_level": "high"
+                },
+                "lead_score": 0.85,
+                "projection": [128-dim 对比空间向量]
+            }
         """
         with torch.no_grad():
             # 1. 生成融合向量
@@ -129,24 +139,64 @@ class ProductionInference:
             projection = self.supcon_model(x)
             projection = projection.squeeze(0)  # [128-dim]
 
-            # 3. 计算与 Label 3 中心的相似度（作为 lead_score）
+            # 3. 计算与 Lead 中心的相似度（作为 lead_score）
             similarity = torch.cosine_similarity(
                 projection.unsqueeze(0), self.label_3_center.unsqueeze(0)
             )
             lead_score = (similarity.item() + 1) / 2  # 归一化到 [0, 1]
 
-            # 4. 获取意图概率
+            # 4. 获取意图特征（概率 + 向量）
             x_features = torch.tensor(session_features, dtype=torch.float32).unsqueeze(0).to(
                 self.device
             )
-            intent_probs, _ = self.student_model(x_features)
+            intent_probs, intent_embedding = self.student_model(x_features)
             intent_probs = intent_probs.squeeze(0).cpu().numpy()
+            intent_embedding = intent_embedding.squeeze(0).cpu().numpy()
+
+            # 5. 提取主要意图和紧急度
+            primary_intent, urgency_level = self._extract_primary_intent_and_urgency(
+                intent_probs
+            )
 
             return {
+                "intent_features": {
+                    "intent_probs": intent_probs.tolist(),
+                    "intent_embedding": intent_embedding.tolist(),
+                    "primary_intent": primary_intent,
+                    "urgency_level": urgency_level,
+                },
                 "lead_score": float(lead_score),
-                "intent_probs": intent_probs.tolist(),
                 "projection": projection.cpu().numpy().tolist(),
             }
+
+    def _extract_primary_intent_and_urgency(
+        self, intent_probs: np.ndarray
+    ) -> tuple:
+        """从意图概率中提取主要意图和紧急度。
+
+        Args:
+            intent_probs: 意图概率向量 (11-dim)
+
+        Returns:
+            (primary_intent, urgency_level)
+        """
+        from src.agent.intent_taxonomy import ALL_INTENTS
+
+        # 找到概率最高的意图
+        primary_idx = int(np.argmax(intent_probs))
+        primary_intent = ALL_INTENTS[primary_idx] if primary_idx < len(ALL_INTENTS) else "unknown"
+        primary_prob = float(intent_probs[primary_idx])
+
+        # 根据概率确定紧急度
+        # high: prob >= 0.7, medium: 0.4 <= prob < 0.7, low: prob < 0.4
+        if primary_prob >= 0.7:
+            urgency_level = "high"
+        elif primary_prob >= 0.4:
+            urgency_level = "medium"
+        else:
+            urgency_level = "low"
+
+        return primary_intent, urgency_level
 
 
 def main():
@@ -172,12 +222,17 @@ def main():
     session_features = np.random.randn(256)  # 模拟特征
 
     # 预测
-    print("\n预测 lead_score...")
+    print("\n预测意图特征和 lead_score...")
     result = inference.predict_lead_score(session_text, session_features)
 
     print(f"\nSession 文本：{session_text}")
-    print(f"Lead Score：{result['lead_score']:.4f}")
-    print(f"意图概率（前 5 个）：{result['intent_probs'][:5]}")
+    print(f"\n意图特征：")
+    print(f"  主要意图：{result['intent_features']['primary_intent']}")
+    print(f"  紧急度：{result['intent_features']['urgency_level']}")
+    print(f"  意图概率（前 5 个）：{result['intent_features']['intent_probs'][:5]}")
+    print(f"  意图向量维度：{len(result['intent_features']['intent_embedding'])}")
+    print(f"\nLead Score：{result['lead_score']:.4f}")
+    print(f"对比空间向量维度：{len(result['projection'])}")
 
 
 if __name__ == "__main__":
